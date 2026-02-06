@@ -2,10 +2,26 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from babel.numbers import format_currency
+
+
+def format_inr(amount, decimals: int = 2) -> str:
+    """
+    Format a numeric value using the Indian numbering system (lakhs, crores).
+    Example: 1234567.89 -> ₹12,34,567.89
+    """
+    if pd.isna(amount):
+        return "N/A"
+    pattern = "¤#,##,##0" + (("." + ("0" * decimals)) if decimals > 0 else "")
+    return format_currency(amount, "INR", locale="en_IN", format=pattern)
+
 
 # -----------------------------------------------------------------------------
 # Configuration & Style
 # -----------------------------------------------------------------------------
+
+
+
 st.set_page_config(
     page_title="Gold & Silver Analysis",
     layout="wide",
@@ -60,7 +76,7 @@ def load_and_process_data():
     # Load Data
     try:
         gold = pd.read_csv("data/gold.csv")
-        silver = pd.read_csv("data/silver.csv")
+        silver = pd.read_csv("data/silver_new.csv")
     except FileNotFoundError:
         st.error("⚠️ Data files not found! Please ensure 'data/gold.csv' and 'data/silver.csv' exist.")
         st.stop()
@@ -232,10 +248,10 @@ gold_full, silver_full, gold_aligned, silver_aligned = load_and_process_data()
 
 # 1. Header
 st.title("Gold & Silver: Trend, Volatility, and Price Band Analysis")
-st.markdown("**Data:** 2014–2025 | **Method:** 200-Day Moving Average & Rolling Volatility")
+st.markdown("**Data:** 2014–2026 | **Method:** 200-Day Moving Average & Rolling Volatility")
 st.divider()
 
-# 2. Snapshots (Use FULL data for latest prices)
+# 2. Snapshots (Use FULL data for latest prices)S
 col1, col2 = st.columns(2)
 
 def render_snapshot(col, title, df, unit):
@@ -248,9 +264,9 @@ def render_snapshot(col, title, df, unit):
         st.markdown(f"""
         <div class="metric-card">
             <div class="metric-label">Latest Price ({unit})</div>
-            <div class="metric-value">₹{last['Close']:,.2f}</div>
+            <div class="metric-value">{format_inr(last['Close'], 2)}</div>
             <div class="metric-label" style="margin-top:10px;">200-Day MA</div>
-            <div style="font-size: 1.1em; color: #555;">{last['MA_200']:,.2f}</div>
+            <div style="font-size: 1.1em; color: #555;">{format_inr(last['MA_200'], 2)}</div>
             <div class="status-text status-{pos_status}">{pos_text}</div>
             <div style="margin-top:15px; font-size:0.9em; color:#888;">
                 Current Volatility: <b>{last['volatility']:.2%}</b>
@@ -302,107 +318,108 @@ st.divider()
 st.subheader("Interactive Strategy Simulator: SIP vs. Lump Sum")
 st.markdown("Simulate how a **Staggered (SIP)** approach compares to a **Lump Sum** investment over a specific period.")
 
-# Controls
-c_sim_ctrl, c_sim_plot = st.columns([1, 2])
+# --- Inputs Section ---
+st.markdown("#### Settings")
+c_in1, c_in2, c_in3, c_in4 = st.columns([1, 1, 1, 1])
 
-with c_sim_ctrl:
-    st.markdown("#### Settings")
+with c_in1:
     sim_asset = st.selectbox("Select Asset", ["Gold", "Silver"])
-    
-    # Get Date Range
-    df_sim = gold_full if sim_asset == "Gold" else silver_full
-    min_date = df_sim.index.min().date()
-    max_date = df_sim.index.max().date()
-    
+
+# Context for date picker
+df_sim = gold_full if sim_asset == "Gold" else silver_full
+min_date = df_sim.index.min().date()
+max_date = df_sim.index.max().date()
+
+with c_in2:
     sim_start_date = st.date_input("Start Date", value=pd.to_datetime("2020-01-01"), min_value=min_date, max_value=max_date)
-    monthly_inv = st.number_input("Monthly Investment (₹)", value=10000, step=1000)
+
+with c_in3:
+    monthly_inv = st.number_input("Monthly Inv. (₹)", value=10000, step=1000)
+
+with c_in4:
+    # Align button with inputs
+    st.write("") 
+    st.write("")
+    run_btn = st.button("Run Simulation", type="primary", use_container_width=True)
+
+# --- Simulation Execution ---
+if run_btn:
+    # Filter Data
+    mask = df_sim.index >= pd.to_datetime(sim_start_date)
+    sim_data = df_sim.loc[mask].copy()
     
-    # Calculate Total Capital for Lump Sum
-    # Logic: Total Months * Monthly Inv = Equivalent Lump Sum Capital
-    # This keeps the 'Total Invested' comparable.
-    
-    if st.button("Run Simulation"):
-        # Filter Data
-        mask = df_sim.index >= pd.to_datetime(sim_start_date)
-        sim_data = df_sim.loc[mask].copy()
-        
-        if len(sim_data) == 0:
-            st.error("No data available for selected date.")
-        else:
-            # --- SIP Calculation ---
-            # Resample to Monthly for SIP buying (approx 1st of month)
-            sip_data = sim_data.resample('MS').first()
-            
-            # Units bought per month
-            sip_data['units_bought'] = monthly_inv / sip_data['Close']
-            sip_data['cum_units'] = sip_data['units_bought'].cumsum()
-            sip_data['total_invested'] = np.arange(1, len(sip_data) + 1) * monthly_inv
-            
-            # Portfolio Value over time (need to map back to daily for smooth chart)
-            # We reindex sip_cum_units to daily to calculate daily portfolio value
-            daily_units = sip_data['cum_units'].reindex(sim_data.index, method='ffill')
-            sim_data['sip_value'] = daily_units * sim_data['Close']
-            sim_data['sip_invested'] = sip_data['total_invested'].reindex(sim_data.index, method='ffill')
-            
-            # --- Lump Sum Calculation ---
-            # Invest Total Expected Capital on Day 1
-            total_months = len(sip_data)
-            total_capital = total_months * monthly_inv
-            
-            lump_units = total_capital / sim_data['Close'].iloc[0]
-            sim_data['lump_value'] = lump_units * sim_data['Close']
-            
-            # --- Results ---
-            final_sip_val = sim_data['sip_value'].iloc[-1]
-            final_lump_val = sim_data['lump_value'].iloc[-1]
-            final_invested = total_capital
-            
-            sip_return = (final_sip_val - final_invested) / final_invested
-            lump_return = (final_lump_val - final_invested) / final_invested
-            
-            # --- Drawdown Calculation (Risk) ---
-            # Formula: (Current Value - Rolling Max) / Rolling Max
-            
-            # SIP
-            sip_peak = sim_data['sip_value'].cummax()
-            sip_dd = (sim_data['sip_value'] - sip_peak) / sip_peak
-            sip_mdd = sip_dd.min()
-
-            # Lump Sum
-            lump_peak = sim_data['lump_value'].cummax()
-            lump_dd = (sim_data['lump_value'] - lump_peak) / lump_peak
-            lump_mdd = lump_dd.min()
-
-            st.success(f"**Total Invested:** ₹{final_invested:,.0f}")
-            
-            # Metrics Row
-            c_res1, c_res2, c_res3, c_res4 = st.columns(4)
-            with c_res1:
-                st.metric("SIP Final Value", f"₹{final_sip_val:,.0f}", f"{sip_return:.1%}")
-            with c_res2:
-                st.metric("SIP Max Risk (DD)", f"{sip_mdd:.1%}", delta_color="inverse")
-            with c_res3:
-                st.metric("Lump Sum Value", f"₹{final_lump_val:,.0f}", f"{lump_return:.1%}")
-            with c_res4:
-                st.metric("Lump Sum Risk (DD)", f"{lump_mdd:.1%}", delta_color="inverse")
-
-            # Risk Insight
-            if abs(lump_mdd) > abs(sip_mdd) + 0.05: # If Lump Sum risk is 5% higher
-                risk_msg = "💡 **Insight:** While Lump Sum may have higher returns in this bull run, **SIP significantly reduced portfolio risk**, suffering a much smaller drawdown during corrections."
-            else:
-                risk_msg = "💡 **Insight:** In this specific sustained uptrend, both strategies performed well, but Lump Sum capitalized on early low prices."
-            
-            st.info(risk_msg)
-            
-            # --- Plot ---
-            with c_sim_plot:
-                fig_sim = go.Figure()
-                fig_sim.add_trace(go.Scatter(x=sim_data.index, y=sim_data['sip_value'], name='SIP Portfolio Value', line=dict(color='#2ecc71', width=2)))
-                fig_sim.add_trace(go.Scatter(x=sim_data.index, y=sim_data['lump_value'], name='Lump Sum Portfolio Value', line=dict(color='#e74c3c', width=2)))
-                # fig_sim.add_trace(go.Scatter(x=sim_data.index, y=sim_data['sip_invested'], name='Total Invested Cost', line=dict(color='gray', dash='dash')))
-                
-                fig_sim.update_layout(title="Portfolio Growth Comparison", yaxis_title="Portfolio Value (₹)", legend=dict(orientation="h", y=1.02), margin=dict(l=20,r=20,t=40,b=20), height=400)
-                st.plotly_chart(fig_sim, use_container_width=True)
+    if len(sim_data) == 0:
+        st.error("No data available for selected date.")
     else:
-        with c_sim_plot:
-            st.info("👈 Select parameters and click 'Run Simulation' to see results.")
+        # --- SIP Calculation ---
+        sip_data = sim_data.resample('MS').first()
+        
+        sip_data['units_bought'] = monthly_inv / sip_data['Close']
+        sip_data['cum_units'] = sip_data['units_bought'].cumsum()
+        sip_data['total_invested'] = np.arange(1, len(sip_data) + 1) * monthly_inv
+        
+        # Daily Portfolio Value reconstruction
+        daily_units = sip_data['cum_units'].reindex(sim_data.index, method='ffill')
+        sim_data['sip_value'] = daily_units * sim_data['Close']
+        sim_data['sip_invested'] = sip_data['total_invested'].reindex(sim_data.index, method='ffill')
+        
+        # --- Lump Sum Calculation ---
+        total_months = len(sip_data)
+        total_capital = total_months * monthly_inv
+        
+        lump_units = total_capital / sim_data['Close'].iloc[0]
+        sim_data['lump_value'] = lump_units * sim_data['Close']
+        
+        # --- Results Extraction ---
+        final_sip_val = sim_data['sip_value'].iloc[-1]
+        final_lump_val = sim_data['lump_value'].iloc[-1]
+        final_invested = total_capital
+        
+        sip_return = (final_sip_val - final_invested) / final_invested
+        lump_return = (final_lump_val - final_invested) / final_invested
+        
+        # --- Risk / Drawdown ---
+        sip_peak = sim_data['sip_value'].cummax()
+        sip_mdd = ((sim_data['sip_value'] - sip_peak) / sip_peak).min()
+
+        lump_peak = sim_data['lump_value'].cummax()
+        lump_mdd = ((sim_data['lump_value'] - lump_peak) / lump_peak).min()
+
+        # --- Display Results (Full Width) ---
+        st.divider()
+        st.markdown(
+            f"<h3 style='text-align: center; color: #4CAF50;'>Total Invested: {format_inr(final_invested, 0)}</h3>",
+            unsafe_allow_html=True,
+        )
+        st.write("")
+
+        # Metrics
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("SIP Final Value", format_inr(final_sip_val, 0), f"{sip_return:.1%}")
+        m2.metric("SIP Max Risk (DD)", f"{sip_mdd:.1%}", delta_color="inverse")
+        m3.metric("Lump Sum Value", format_inr(final_lump_val, 0), f"{lump_return:.1%}")
+        m4.metric("Lump Sum Risk (DD)", f"{lump_mdd:.1%}", delta_color="inverse")
+
+        st.write("")
+        
+        # Insight Logic
+        if abs(lump_mdd) > abs(sip_mdd) + 0.05: 
+            risk_msg = "💡 **Insight:** While Lump Sum may have higher returns in strong bull runs, **SIP significantly reduced portfolio risk** (Drawdown), protecting capital during corrections."
+        else:
+            risk_msg = "💡 **Insight:** In this specific sustained uptrend, both strategies performed well, but Lump Sum capitalized on early low prices."
+        st.info(risk_msg)
+
+        # Plot
+        st.subheader("Portfolio Growth Comparison")
+        fig_sim = go.Figure()
+        fig_sim.add_trace(go.Scatter(x=sim_data.index, y=sim_data['sip_value'], name='SIP Portfolio Value', line=dict(color='#2ecc71', width=3)))
+        fig_sim.add_trace(go.Scatter(x=sim_data.index, y=sim_data['lump_value'], name='Lump Sum Portfolio Value', line=dict(color='#e74c3c', width=3)))
+        
+        fig_sim.update_layout(
+            yaxis_title="Portfolio Value (₹)", 
+            legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"), 
+            hovermode="x unified",
+            height=500, # Taller graph as requested
+            margin=dict(l=20,r=20,t=20,b=20)
+        )
+        st.plotly_chart(fig_sim, use_container_width=True)
